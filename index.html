@@ -3,6 +3,182 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kael Engine - Chapter Progression Build</title>
+  <style>
+    html, body { margin: 0; background:#05070d; overflow:hidden; font-family: Inter, Segoe UI, Arial, sans-serif; color:#e8f1ff; }
+    #game { display:block; margin:0 auto; background: radial-gradient(circle at 50% 35%, #141d31, #05070d 66%); }
+    #help { position:fixed; left:10px; top:10px; z-index:10; font-size:12px; line-height:1.35; background:#0009; border:1px solid #ffffff30; border-radius:8px; padding:8px 10px; max-width:430px; }
+    .k{color:#6ce6ff;font-weight:700}
+  </style>
+</head>
+<body>
+<canvas id="game" width="1280" height="720"></canvas>
+<div id="help">
+  <div><b>Kael: Fractured Chapters</b></div>
+  <div><span class="k">WASD</span> Move, <span class="k">Space</span> Slash, <span class="k">Q/W/E/R</span> Abilities</div>
+  <div><span class="k">1</span> Combat • <span class="k">2</span> Gacha • <span class="k">3</span> Inventory • <span class="k">4</span> World Map</div>
+  <div><span class="k">N</span> Next Stage (after clear), <span class="k">G</span> Pull, <span class="k">I/K</span> List Up/Down, <span class="k">Enter</span> Equip</div>
+</div>
+<script>
+(() => {
+'use strict';
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height, TAU = Math.PI * 2;
+const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+const rand = (a,b)=>Math.random()*(b-a)+a;
+const randi = (a,b)=>Math.floor(rand(a,b+1));
+const dist = (ax,ay,bx,by)=>Math.hypot(bx-ax,by-ay);
+
+class Input {
+  constructor(){ this.down=new Set(); this.pressed=new Set();
+    addEventListener('keydown',e=>{const k=e.key.toLowerCase(); if(!this.down.has(k)) this.pressed.add(k); this.down.add(k); if([" ","arrowup","arrowdown","arrowleft","arrowright"].includes(k)) e.preventDefault();});
+    addEventListener('keyup',e=>this.down.delete(e.key.toLowerCase()));
+  }
+  isDown(k){return this.down.has(k.toLowerCase());}
+  wasPressed(k){return this.pressed.has(k.toLowerCase());}
+  end(){this.pressed.clear();}
+}
+class SceneManager { constructor(){this.current=null;} set(s){this.current=s; s.enter?.();} update(dt){this.current?.update(dt);} draw(ctx){this.current?.draw(ctx);} }
+
+const rarityOrder=['Common','Rare','Epic','Legendary','Mythic'];
+const rarityColor={Common:'#f0f5ff',Rare:'#48a7ff',Epic:'#a75fff',Legendary:'#ffc94f',Mythic:'#ff4df0'};
+const baseRates={Common:60,Rare:25,Epic:10,Legendary:4,Mythic:1};
+const chapterMechanics=[
+  'Basic Combat','Status Effects','Enemy Shields','Dodge Timing','Energy Overdrive',
+  'Hazard Zones','Enemy Synergy','Phase Bosses','Debuff Fields','Multi-Boss Threat'
+];
+
+function generateCharacters(){
+  const seeds=['Kael','Nyra','Riven','Lune','Drax','Sera','Ignis','Kora','Vex','Astra','Thorn','Mira','Orin','Zeph','Noct'];
+  const arts=['Frame Skip','Pulse Rift','Echo Break','Astral Dart','Void Lock','Phase Slice'];
+  const list=[];
+  for(let i=1;i<=62;i++){
+    const name=`${seeds[(i-1)%seeds.length]}-${String(i).padStart(2,'0')}`;
+    const rarity=i%100===0?'Mythic':i%27===0?'Legendary':i%9===0?'Epic':i%3===0?'Rare':'Common';
+    const t=rarityOrder.indexOf(rarity);
+    list.push({
+      id:i,name,rarity,ability:`${arts[i%arts.length]} ${['I','II','III','IV'][i%4]}`,
+      stats:{hp:randi(88+t*20,110+t*24),attack:randi(12+t*6,17+t*8),speed:randi(170+t*12,196+t*14),chi:105+t*10,cooldownMult:(1.14-0.08*t),chiRegen:18+t*2}
+    });
+  }
+  list.push({id:101,name:'Kael Prime',rarity:'Mythic',ability:'Absolute Frame Collapse',stats:{hp:238,attack:52,speed:265,chi:168,cooldownMult:0.76,chiRegen:32}});
+  list.push({id:102,name:'Iron Revenant Core',rarity:'Legendary',ability:'Core Fracture',stats:{hp:205,attack:41,speed:228,chi:150,cooldownMult:0.86,chiRegen:26}});
+  return list;
+}
+
+class ProgressionManager {
+  constructor(){
+    this.playerLevel=1; this.playerXp=0; this.accountLevel=1; this.accountXp=0;
+    this.gold=0; this.materials=0; this.gachaCurrency=400;
+    this.skillPoints=0; this.skillTree={atkNode:0,hpNode:0,chiNode:0};
+    this.currentChapter=1; this.currentStage=1; this.unlockedChapter=1;
+    this.completed={}; this.stageRanks={}; this.achievements=new Set(); this.endgame={hard:false,endless:false,pvp:false,raid:false};
+  }
+  chapterScale(ch){ return { hp:Math.pow(1.2,ch-1), dmg:Math.pow(1.15,ch-1), aiTier:1+Math.floor((ch-1)/2) }; }
+  stageType(stage){ if(stage===10) return 'Mini Boss'; if(stage===15) return 'Final Boss'; if(stage>=11) return 'Scaling'; if(stage>=7&&stage<=9) return 'Mechanic'; if(stage>=4&&stage<=6) return 'Elite'; return 'Combat'; }
+  get chapterMechanic(){ return chapterMechanics[this.currentChapter-1]||'Unknown'; }
+  getStageConfig(){
+    const ch=this.currentChapter, st=this.currentStage, sc=this.chapterScale(ch), type=this.stageType(st);
+    const targetKills=type==='Mini Boss'||type==='Final Boss'?0:8+Math.floor(st*1.4)+Math.floor(ch*2.2);
+    return { chapter:ch, stage:st, type, scale:sc, targetKills, timePar:66 - Math.min(24,ch*2+Math.floor(st/2)), eliteBoost:type==='Elite'?1.25:1 };
+  }
+  rankStage(metrics,cfg){
+    let points=0;
+    if(metrics.time <= cfg.timePar) points+=30; else if(metrics.time <= cfg.timePar*1.4) points+=20; else points+=8;
+    if(metrics.damageTaken <= cfg.chapter*4+8) points+=30; else if(metrics.damageTaken <= cfg.chapter*9+16) points+=18; else points+=6;
+    if(metrics.comboMax >= 12) points+=20; else if(metrics.comboMax >= 7) points+=12; else points+=4;
+    const eff = metrics.hits>0 ? metrics.abilityCasts / metrics.hits : 1;
+    if(eff>=0.12 && eff<=0.42) points+=20; else if(eff<=0.55) points+=14; else points+=6;
+    return points>=90?'S':points>=74?'A':points>=56?'B':'C';
+  }
+  addXP(xp){
+    this.playerXp+=xp; this.accountXp+=Math.floor(xp*0.55);
+    while(this.playerXp >= this.playerLevel*110){ this.playerXp -= this.playerLevel*110; this.playerLevel++; this.skillPoints++; }
+    while(this.accountXp >= this.accountLevel*160){ this.accountXp -= this.accountLevel*160; this.accountLevel++; this.gachaCurrency += 25; }
+  }
+  claimStageRewards(rank,cfg,firstClear){
+    const base=30 + cfg.chapter*12 + cfg.stage*5;
+    const mult=rank==='S'?1.6:rank==='A'?1.35:rank==='B'?1.18:1;
+    const gold=Math.round(base*mult), xp=Math.round((22+cfg.chapter*8+cfg.stage*4)*mult), mats=Math.round((4+cfg.chapter+cfg.stage*0.5)*mult);
+    this.gold+=gold; this.materials+=mats; this.addXP(xp);
+    if(firstClear){ this.gachaCurrency += 25 + cfg.chapter*4; }
+    if(rank==='S') this.achievements.add(`S${cfg.chapter}-${cfg.stage}`);
+    return {gold,xp,mats};
+  }
+  clearStage(rank){
+    const key=`${this.currentChapter}-${this.currentStage}`;
+    const first=!this.completed[key];
+    this.completed[key]=true; this.stageRanks[key]=rank;
+    const cfg=this.getStageConfig();
+    const rewards=this.claimStageRewards(rank,cfg,first);
+    if(this.currentStage<15){ this.currentStage++; }
+    else {
+      if(this.currentChapter===this.unlockedChapter && this.unlockedChapter<10){ this.unlockedChapter++; }
+      this.currentStage=1;
+      if(this.currentChapter<this.unlockedChapter) this.currentChapter++;
+      this.gachaCurrency += 120; // chapter clear bonus
+      this.skillPoints += 1;
+      if(this.unlockedChapter>=10){ this.endgame.hard=true; this.endgame.endless=true; this.endgame.pvp=true; this.endgame.raid=true; }
+    }
+    return {first,rewards};
+  }
+}
+
+class InventoryManager{
+  constructor(chars,progress){ this.characters=chars; this.progress=progress; this.owned=new Set([1,2,3,4,5]); this.equippedId=1; this.pullHistory=[]; }
+  add(c){ this.owned.add(c.id); this.pullHistory.unshift(`${new Date().toLocaleTimeString()} ${c.rarity} ${c.name}`); if(this.pullHistory.length>14)this.pullHistory.length=14; }
+  listOwned(){ return this.characters.filter(c=>this.owned.has(c.id)); }
+  get equipped(){ return this.characters.find(c=>c.id===this.equippedId)||this.characters[0]; }
+  equip(id){ if(this.owned.has(id)) this.equippedId=id; }
+}
+
+class GachaManager{
+  constructor(chars,inv,progress){ this.chars=chars; this.inv=inv; this.progress=progress; this.pityL=0; this.pityM=0; this.anim={active:false,t:0,step:0,result:null}; }
+  dynamicRates(){
+    const ch=this.progress.currentChapter;
+    const loreBoost = ch>=5?1:0;
+    const rates={...baseRates};
+    rates.Legendary += loreBoost*0.5;
+    rates.Mythic += ch>=8?0.4:0;
+    rates.Common -= loreBoost*0.7 + (ch>=8?0.2:0);
+    return rates;
+  }
+  rollRarity(){
+    if(this.pityM>=140) return 'Mythic';
+    if(this.pityL>=75) return Math.random()<0.2?'Mythic':'Legendary';
+    const rates=this.dynamicRates();
+    if(this.pityL>=20){ const b=Math.min(18,(this.pityL-19)*0.6); rates.Legendary+=b; rates.Common-=b*0.7; rates.Rare-=b*0.2; rates.Epic-=b*0.1; }
+    let r=Math.random()*100,a=0;
+    for(const k of ['Common','Rare','Epic','Legendary','Mythic']){ a+=rates[k]; if(r<=a) return k; }
+    return 'Common';
+  }
+  pull(){
+    const cost=100;
+    if(this.progress.gachaCurrency<cost || this.anim.active) return null;
+    this.progress.gachaCurrency-=cost;
+    const rarity=this.rollRarity();
+    const pool=this.chars.filter(c=>c.rarity===rarity);
+    const c=pool[randi(0,pool.length-1)];
+    this.inv.add(c);
+    this.pityL++; this.pityM++; if(['Legendary','Mythic'].includes(c.rarity)) this.pityL=0; if(c.rarity==='Mythic') this.pityM=0;
+    this.anim={active:true,t:0,step:0,result:c}; return c;
+  }
+  update(dt){ if(!this.anim.active)return; this.anim.t+=dt; if(this.anim.t>0.6)this.anim.step=1; if(this.anim.t>1.2)this.anim.step=2; if(this.anim.t>2.7)this.anim.active=false; }
+  drawAnim(ctx){
+    if(!this.anim.active) return;
+    const a=this.anim,c=a.result,col=rarityColor[c.rarity];
+    ctx.save();
+    ctx.fillStyle='#000a'; ctx.fillRect(0,0,W,H);
+    const g=ctx.createRadialGradient(W/2,H/2,10,W/2,H/2,420); g.addColorStop(0,col+'dd'); g.addColorStop(1,'#00000000');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+    if(c.rarity==='Mythic') for(let i=0;i<12;i++){ctx.strokeStyle=`hsla(${(a.t*190+i*28)%360},100%,60%,.78)`;ctx.beginPath();ctx.arc(W/2,H/2,120+i*12+Math.sin(a.t*5+i)*4,0,TAU);ctx.stroke();}
+    ctx.translate(W/2,H/2); const s=1+Math.sin(a.t*8)*0.04; ctx.scale(s,s);
+    ctx.fillStyle='#101627f0'; ctx.strokeStyle=col; ctx.lineWidth=4; ctx.fillRect(-190,-250,380,500); ctx.strokeRect(-190,-250,380,500);
+    ctx.textAlign='center'; ctx.fillStyle=col; ctx.font='700 30px Segoe UI'; ctx.fillText(a.step?c.rarity:'???',0,-180);
+    ctx.fillStyle='#f4f8ff'; ctx.font='700 36px Segoe UI'; ctx.fillText(a.step?c.name:'Decoding...',0,-20);
+    ctx.font='500 22px Segoe UI'; ctx.fillText(a.step?c.ability:'Signal Noise',0,18);
+    if(a.step){ ctx.font='500 19px Segoe UI'; ctx.fillText(`HP ${c.stats.hp}  ATK ${c.stats.attack}  SPD ${c.stats.speed}`,0,124); }
   <title>Kael: Fractured Frame Engine</title>
   <style>
     html, body { margin: 0; padding: 0; background: #06080f; color: #eaf2ff; font-family: Inter, Segoe UI, Roboto, Arial, sans-serif; overflow: hidden; }
@@ -248,6 +424,236 @@ class GachaManager {
   }
 }
 
+class Entity{ constructor(x,y,r=12){this.x=x;this.y=y;this.vx=0;this.vy=0;this.r=r;this.alive=true;this.flash=0;} }
+class Projectile extends Entity{
+  constructor(x,y,vx,vy,damage,owner='enemy',life=2.2,color='#f66'){ super(x,y,5); Object.assign(this,{vx,vy,damage,owner,life,color}); }
+  update(dt){ this.x+=this.vx*dt; this.y+=this.vy*dt; this.life-=dt; if(this.life<=0||this.x<-40||this.x>W+40||this.y<-40||this.y>H+40)this.alive=false; }
+  draw(ctx){ ctx.fillStyle=this.color; ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,TAU); ctx.fill(); }
+}
+class Clone extends Entity{
+  constructor(p){ super(p.x,p.y,12); this.t=0.36; this.damage=p.attack*0.88; }
+  update(dt,world){ this.t-=dt; if(this.t<=0)this.alive=false; for(const e of world.enemyManager.enemies) if(e.alive&&dist(this.x,this.y,e.x,e.y)<72) e.takeDamage(this.damage,world); if(world.boss?.alive&&dist(this.x,this.y,world.boss.x,world.boss.y)<90) world.boss.takeDamage(this.damage,world); }
+  draw(ctx){ ctx.globalAlpha=.45; ctx.fillStyle='#79deff'; ctx.beginPath(); ctx.arc(this.x,this.y,this.r+Math.sin(this.t*50)*2,0,TAU); ctx.fill(); ctx.globalAlpha=1; }
+}
+
+class Player extends Entity{
+  constructor(x,y,character,progress){ super(x,y,15); this.progress=progress; this.applyCharacter(character); this.hp=this.maxHp; this.chi=this.maxChi; this.glitch=0; this.zero=false; this.facing=1; this.hitInv=0; this.atkCd=0; this.slashT=0; this.guilty=0; this.guiltyTimer=0; }
+  applyCharacter(c){ this.character=c; const lvl=this.progress.playerLevel; const hpMul=1+this.progress.skillTree.hpNode*0.05+lvl*0.012; const atkMul=1+this.progress.skillTree.atkNode*0.05+lvl*0.01; const chiMul=1+this.progress.skillTree.chiNode*0.04;
+    this.maxHp=Math.round(c.stats.hp*hpMul); this.attack=Math.round(c.stats.attack*atkMul); this.speed=c.stats.speed; this.maxChi=Math.round(c.stats.chi*chiMul); this.chiRegen=c.stats.chiRegen + lvl*0.2; this.cooldownMult=c.stats.cooldownMult;
+    this.hp=clamp(this.hp||this.maxHp,1,this.maxHp); this.chi=clamp(this.chi||this.maxChi,0,this.maxChi);
+  }
+  takeDamage(v,world){ if(this.hitInv>0)return; this.hp-=v; world.metrics.damageTaken+=v; this.hitInv=.38; world.fx.shake=Math.max(world.fx.shake,7); world.fx.hitFlash=.5; if(this.hp<=0){ this.hp=0; world.gameOver=true; this.alive=false; }}
+  update(dt,world){
+    const i=world.game.input; let mx=(i.isDown('d')?1:0)-(i.isDown('a')?1:0), my=(i.isDown('s')?1:0)-(i.isDown('w')?1:0); const m=Math.hypot(mx,my)||1;
+    const sp=this.speed*(this.zero?1.32:1); this.vx=mx/m*sp; this.vy=my/m*sp; this.x=clamp(this.x+this.vx*dt,16,W-16); this.y=clamp(this.y+this.vy*dt,16,H-16); if(mx!==0)this.facing=Math.sign(mx);
+    this.chi=clamp(this.chi+this.chiRegen*dt,0,this.maxChi); this.hitInv-=dt; this.atkCd-=dt; this.slashT-=dt;
+    if(i.wasPressed(' ')&&this.atkCd<=0){ this.atkCd=.26; this.slashT=.14; world.metrics.hits++; world.hitArc(this.x+this.facing*34,this.y,64,this.attack*(this.zero?1.3:1)); }
+    if(this.zero){ this.hp-=6*dt; this.glitch-=13*dt; if(i.wasPressed(' ')&&this.atkCd<=.08){ world.metrics.hits++; world.hitArc(this.x+this.facing*48,this.y,92,this.attack*.72);} if(this.glitch<=0||this.hp<=1){this.glitch=0;this.zero=false;} }
+    else this.glitch=Math.max(0,this.glitch-dt*4);
+    if(!this.zero&&this.glitch>=100){ this.zero=true; this.glitch=100; world.fx.shake=12; }
+    if(this.guiltyTimer>0){ this.guiltyTimer-=dt; if(this.guiltyTimer<=0) this.guilty=Math.max(0,this.guilty-1); }
+  }
+  draw(ctx){ ctx.fillStyle=this.hitInv>0?'#ff6d7e':(this.zero?'#ff4ce7':'#6ce6ff'); ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,TAU); ctx.fill(); if(this.slashT>0){ ctx.strokeStyle='#dcf7ff'; ctx.lineWidth=3; ctx.beginPath(); ctx.arc(this.x,this.y,26,-.4+(this.facing<0?Math.PI:0),.9+(this.facing<0?Math.PI:0)); ctx.stroke(); }}
+}
+
+class Enemy extends Entity{
+  constructor(x,y,kind,cfg){
+    const d={basic:{hp:52,sp:92,dmg:8,col:'#ff8d82',r:13},fast:{hp:34,sp:152,dmg:6,col:'#ffbf72',r:10},tank:{hp:126,sp:58,dmg:14,col:'#9d5858',r:18},ranged:{hp:44,sp:74,dmg:8,col:'#c596ff',r:12}}[kind];
+    super(x,y,d.r); this.kind=kind; this.maxHp=Math.round(d.hp*cfg.hpScale*cfg.eliteBoost); this.hp=this.maxHp; this.speed=d.sp*(1+(cfg.aiTier-1)*0.08); this.damage=Math.round(d.dmg*cfg.dmgScale); this.col=d.col; this.shootCd=rand(.5,1.6); this.shield=cfg.hasShield?Math.round(this.maxHp*0.35):0;
+  }
+  takeDamage(v,world){ if(this.shield>0){this.shield-=v*1.1; if(this.shield<0)this.shield=0; this.flash=.07; return;} this.hp-=v; this.flash=.08; if(this.hp<=0){this.alive=false; world.onEnemyKilled();} }
+  update(dt,world){
+    const p=world.player; this.flash-=dt; const d=dist(this.x,this.y,p.x,p.y)||1, dx=(p.x-this.x)/d, dy=(p.y-this.y)/d;
+    if(this.kind==='ranged'){ const keep=220; const s=d>keep?1:-1; this.vx=dx*this.speed*s; this.vy=dy*this.speed*s; this.shootCd-=dt; if(this.shootCd<=0){this.shootCd=rand(.9,1.6)/(1+world.cfg.scale.aiTier*0.1); world.projectiles.push(new Projectile(this.x,this.y,dx*220,dy*220,this.damage,'enemy',2.4,'#d6adff'));} }
+    else { this.vx=dx*this.speed; this.vy=dy*this.speed; if(world.cfg.scale.aiTier>=3&&Math.random()<0.015){ this.vx+=rand(-120,120); this.vy+=rand(-120,120);} }
+    if(world.slow.active&&dist(this.x,this.y,world.slow.x,world.slow.y)<world.slow.r){ this.vx*=0.36; this.vy*=0.36; }
+    this.x+=this.vx*dt; this.y+=this.vy*dt; if(d<this.r+p.r+2) p.takeDamage(this.damage*dt*2.3,world);
+  }
+  draw(ctx){ ctx.fillStyle=this.flash>0?'#fff':this.col; ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,TAU); ctx.fill(); ctx.fillStyle='#0009'; ctx.fillRect(this.x-16,this.y-this.r-14,32,4); ctx.fillStyle='#89ff98'; ctx.fillRect(this.x-16,this.y-this.r-14,32*(this.hp/this.maxHp),4); if(this.shield>0){ctx.strokeStyle='#7bc6ff';ctx.strokeRect(this.x-18,this.y-this.r-20,36,4);} }
+}
+
+class Boss extends Entity{
+  constructor(name,cfg){ super(W/2,130,34); this.name=name; this.maxHp=Math.round(cfg.baseHp*cfg.hpScale); this.hp=this.maxHp; this.phase=1; this.moveT=0; this.atkT=0; this.judgeT=5.5; this.cfg=cfg; }
+  takeDamage(v,world){ this.hp-=v; this.flash=.08; if(this.hp<=0){this.alive=false; world.onBossKilled();} }
+  update(dt,world){
+    this.flash-=dt; const p=world.player; const pct=this.hp/this.maxHp; this.phase=pct>.66?1:pct>.33?2:3;
+    this.moveT-=dt; if(this.moveT<=0){ this.moveT=1.1-this.phase*.13; const tx=clamp(p.x+rand(-220,220),100,W-100), ty=clamp(95+rand(-40,95),70,250); this.vx=(tx-this.x)*1.8; this.vy=(ty-this.y)*1.8; }
+    this.x+=this.vx*dt; this.y+=this.vy*dt;
+    this.atkT-=dt; if(this.atkT<=0){ this.atkT=Math.max(.42,1.3-this.phase*.19); this.firePattern(world); }
+    if(this.cfg.multi && this.phase>=2 && Math.random()<0.02) for(let i=0;i<10+this.phase;i++){const a=(i/(10+this.phase))*TAU+Math.random()*0.12; world.projectiles.push(new Projectile(this.x,this.y,Math.cos(a)*170,Math.sin(a)*170,11+this.phase*2,'enemy',2.8,'#ff9be8'));}
+    if(this.phase===3 && this.cfg.judgment){ this.judgeT-=dt; if(this.judgeT<=0){ this.judgeT=4.2; p.guilty++; p.guiltyTimer=9; world.fx.hitFlash=.24; if(p.guilty>=3){p.guilty=0; p.takeDamage(52,world); world.fx.shake=15; }} }
+    if(dist(this.x,this.y,p.x,p.y)<this.r+p.r+7) p.takeDamage(16*dt,world);
+  }
+  firePattern(world){ const p=world.player, aim=Math.atan2(p.y-this.y,p.x-this.x), shots=this.phase===1?3:this.phase===2?5:7, spread=this.phase===1?.24:.55;
+    for(let i=0;i<shots;i++){const t=shots===1?0:(i/(shots-1)-.5),a=aim+t*spread,s=230+this.phase*26; world.projectiles.push(new Projectile(this.x,this.y,Math.cos(a)*s,Math.sin(a)*s,12+this.phase*2,'enemy',3,'#ffd6f5'));}
+  }
+  draw(ctx){ ctx.fillStyle=this.flash>0?'#fff':['#ffa4d8','#ff6fc2','#ff3ea6'][this.phase-1]; ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,TAU); ctx.fill(); ctx.strokeStyle='#ffd0ea'; ctx.strokeRect(this.x-12,this.y-12,24,24); }
+}
+
+class AbilityManager{
+  constructor(world){ this.world=world; this.cd={q:0,w:0,e:0,r:0}; this.base={q:4,w:7,e:8,r:12}; }
+  update(dt){ for(const k in this.cd) this.cd[k]=Math.max(0,this.cd[k]-dt); }
+  can(k,cost){ return this.cd[k]<=0&&this.world.player.chi>=cost; }
+  useGlitch(v){ this.world.player.glitch=clamp(this.world.player.glitch+v,0,100); this.world.metrics.abilityCasts++; }
+  castQ(){const p=this.world.player,c=18; if(!this.can('q',c))return; p.chi-=c; const i=this.world.game.input; let dx=(i.isDown('d')?1:0)-(i.isDown('a')?1:0),dy=(i.isDown('s')?1:0)-(i.isDown('w')?1:0); if(!dx&&!dy)dx=p.facing; const m=Math.hypot(dx,dy)||1; p.x=clamp(p.x+dx/m*170,16,W-16); p.y=clamp(p.y+dy/m*170,16,H-16); this.world.hitArc(p.x,p.y,58,p.attack*1.45); this.cd.q=this.base.q*p.cooldownMult; this.useGlitch(18); this.world.fx.shake=9; }
+  castW(){const p=this.world.player,c=24; if(!this.can('w',c))return; p.chi-=c; this.world.slow={active:true,x:p.x,y:p.y,r:185,t:3.2}; this.cd.w=this.base.w*p.cooldownMult; this.useGlitch(22); }
+  castE(){const p=this.world.player,c=21; if(!this.can('e',c))return; p.chi-=c; this.world.clones.push(new Clone(p)); this.cd.e=this.base.e*p.cooldownMult; this.useGlitch(20); this.world.fx.glitch=.35; }
+  castR(){const p=this.world.player,c=38; if(!this.can('r',c))return; p.chi-=c; let del=0; for(const pr of this.world.projectiles) if(pr.owner==='enemy'&&dist(pr.x,pr.y,p.x,p.y)<280){pr.alive=false;del++;} this.world.hitArc(p.x,p.y,132,p.attack*1.82+del*.7); this.cd.r=this.base.r*p.cooldownMult; this.useGlitch(32); this.world.fx.shake=14; this.world.fx.hitFlash=.2; }
+}
+
+class EnemyManager{
+  constructor(world){ this.world=world; this.enemies=[]; this.spawnT=0; }
+  clear(){ this.enemies.length=0; }
+  update(dt){
+    if(this.world.stageCleared||this.world.gameOver) return;
+    this.spawnT-=dt;
+    const cfg=this.world.cfg, maxEnemies=cfg.type.includes('Boss')?8:18+Math.floor(cfg.chapter*1.7);
+    if(this.spawnT<=0&&this.enemies.length<maxEnemies&&this.world.metrics.kills<cfg.targetKills){ this.spawnT=Math.max(.24,1.06-cfg.chapter*.05-cfg.stage*.01); this.spawn(); }
+    for(const e of this.enemies) e.update(dt,this.world);
+    this.enemies=this.enemies.filter(e=>e.alive);
+  }
+  spawn(){
+    const edge=randi(0,3); let x=0,y=0; if(edge===0){x=rand(0,W);y=-20;} if(edge===1){x=W+20;y=rand(0,H);} if(edge===2){x=rand(0,W);y=H+20;} if(edge===3){x=-20;y=rand(0,H);} 
+    let kind='basic'; const r=Math.random(); if(r<.46)kind='basic'; else if(r<.7)kind='fast'; else if(r<.88)kind='tank'; else kind='ranged';
+    const cfg=this.world.cfg;
+    this.enemies.push(new Enemy(x,y,kind,{hpScale:cfg.scale.hp*cfg.eliteBoost,dmgScale:cfg.scale.dmg,aiTier:cfg.scale.aiTier,eliteBoost:cfg.type==='Elite'?1.25:1,hasShield:cfg.chapter>=3&&cfg.type!=='Combat'&&Math.random()<0.4}));
+  }
+  draw(ctx){ for(const e of this.enemies)e.draw(ctx); }
+}
+
+class CollisionManager{ constructor(world){this.world=world;} update(dt){ const p=this.world.player; for(const pr of this.world.projectiles){ if(!pr.alive)continue; pr.update(dt); if(pr.owner==='enemy'&&dist(pr.x,pr.y,p.x,p.y)<p.r+pr.r){ p.takeDamage(pr.damage,this.world); pr.alive=false; }} this.world.projectiles=this.world.projectiles.filter(p=>p.alive);} }
+
+class UIManager{
+  bar(x,y,w,h,val,max,col,label){ ctx.fillStyle='#0009'; ctx.fillRect(x,y,w,h); ctx.fillStyle=col; ctx.fillRect(x,y,w*clamp(val/max,0,1),h); ctx.strokeStyle='#ffffff40'; ctx.strokeRect(x,y,w,h); ctx.fillStyle='#eaf2ff'; ctx.font='600 13px Segoe UI'; ctx.fillText(`${label}: ${Math.round(val)}/${Math.round(max)}`,x+8,y+h-5); }
+  drawGameplay(world){
+    const p=world.player,cfg=world.cfg,prog=world.game.progress;
+    this.bar(18,18,270,18,p.hp,p.maxHp,'#ff6176','HP'); this.bar(18,42,270,16,p.chi,p.maxChi,'#58b4ff','Chi'); this.bar(18,63,270,14,p.glitch,100,p.zero?'#ff43d6':'#8a78ff','Glitch');
+    ctx.fillStyle='#a5cbff'; ctx.font='600 15px Segoe UI';
+    ctx.fillText(`Chapter ${cfg.chapter} - Stage ${cfg.stage}/15 (${cfg.type})`, 310, 30);
+    ctx.fillText(`Mechanic: ${prog.chapterMechanic}`, 310, 52);
+    ctx.fillText(`Kills: ${world.metrics.kills}/${cfg.targetKills||'Boss'}`, 310, 74);
+    ctx.fillText(`Rank Timer: ${world.metrics.time.toFixed(1)}s (Par ${cfg.timePar}s)`, 310, 96);
+
+    const am=world.ability; [['Q','q'],['W','w'],['E','e'],['R','r']].forEach((v,i)=>{const x=20+i*72,y=H-70,w=64,h=50,cd=am.cd[v[1]],max=am.base[v[1]]*p.cooldownMult,ready=cd<=0; ctx.fillStyle='#091121d8'; ctx.fillRect(x,y,w,h); ctx.strokeStyle=ready?'#79ffc8':'#ffffff30'; ctx.strokeRect(x,y,w,h); ctx.fillStyle=ready?'#79ffc8':'#ffb4b4'; ctx.fillText(v[0],x+7,y+15); ctx.fillStyle='#eaf2ff'; ctx.fillText(ready?'READY':cd.toFixed(1)+'s',x+7,y+36); if(!ready){ctx.fillStyle='#0008'; ctx.fillRect(x,y,w,h*(cd/max));}});
+
+    if(world.boss?.alive){ this.bar(W*0.2,16,W*0.6,20,world.boss.hp,world.boss.maxHp,'#ff69b9',`${world.boss.name} P${world.boss.phase}`); ctx.fillStyle='#ffd9ee'; ctx.fillText(`Judgment: ${p.guilty}/3`, W*0.2, 53); }
+    if(world.stageCleared){ ctx.fillStyle='#000b'; ctx.fillRect(0,0,W,H); ctx.fillStyle='#79ffc8'; ctx.font='700 48px Segoe UI'; ctx.fillText(`STAGE CLEAR - Rank ${world.stageRank}`, W/2-250,H/2-40); ctx.font='500 24px Segoe UI'; ctx.fillStyle='#ebf4ff'; ctx.fillText(`Rewards: +${world.lastRewards.gold} Gold, +${world.lastRewards.xp} XP, +${world.lastRewards.mats} Mats`, W/2-280,H/2+8); ctx.fillText('Press N for Next Stage', W/2-130,H/2+42); }
+    if(world.gameOver){ ctx.fillStyle='#000c'; ctx.fillRect(0,0,W,H); ctx.fillStyle='#ff9fb4'; ctx.font='700 52px Segoe UI'; ctx.fillText('SYSTEM FAILURE',W/2-185,H/2-16); ctx.font='500 24px Segoe UI'; ctx.fillStyle='#ecf4ff'; ctx.fillText('Press 1 to Retry Stage',W/2-130,H/2+24); }
+
+    ctx.fillStyle='#9fc6ff'; ctx.fillText(`Equipped: ${p.character.name} (${p.character.rarity})`, 860, 28); ctx.fillText(`Lvl ${prog.playerLevel} (${prog.playerXp}/${prog.playerLevel*110})`,860,50); ctx.fillText(`Gold ${prog.gold}  Mats ${prog.materials}  Gacha ${prog.gachaCurrency}`,860,72);
+  }
+  drawGacha(game){
+    const g=game.gacha,p=game.progress;
+    ctx.fillStyle='#bfe0ff'; ctx.font='700 36px Segoe UI'; ctx.fillText('Chrono Banner Terminal',36,64); ctx.font='500 20px Segoe UI'; ctx.fillText('Press G to pull (100 currency). 1/3/4 to switch scenes.',36,94);
+    const rates=g.dynamicRates(); ctx.fillStyle='#dfe9ff'; ctx.font='500 18px Segoe UI'; ctx.fillText('Rates:',40,136); let y=166; for(const k of ['Common','Rare','Epic','Legendary','Mythic']){ctx.fillStyle=rarityColor[k]; ctx.fillText(`${k}: ${rates[k].toFixed(1)}%`,56,y); y+=24;}
+    ctx.fillStyle='#e8f1ff'; ctx.fillText(`Currency: ${p.gachaCurrency}`,40,y+16); ctx.fillText(`Pity Legendary+: ${g.pityL}/75`,40,y+42); ctx.fillText(`Pity Mythic: ${g.pityM}/140`,40,y+66);
+    ctx.fillStyle='#0b1223dd'; ctx.fillRect(W-470,130,410,310); ctx.strokeStyle='#84b1ff'; ctx.strokeRect(W-470,130,410,310); ctx.fillStyle='#eaf3ff'; ctx.font='700 22px Segoe UI'; ctx.fillText('Pull History',W-440,162); ctx.font='500 15px Segoe UI'; let py=188; for(const h of game.inventory.pullHistory){ctx.fillStyle='#d0e4ff'; ctx.fillText(h,W-440,py); py+=20;}
+    if(g.anim.active) g.drawAnim(ctx);
+  }
+  drawInventory(game,cursor){
+    const inv=game.inventory, list=inv.listOwned().sort((a,b)=>rarityOrder.indexOf(b.rarity)-rarityOrder.indexOf(a.rarity)||a.id-b.id);
+    ctx.fillStyle='#cff1ff'; ctx.font='700 34px Segoe UI'; ctx.fillText('Inventory Matrix',34,58); ctx.font='500 18px Segoe UI'; ctx.fillText('I/K navigate • Enter equip • 1/2/4 switch scene',34,84);
+    ctx.fillStyle='#0a1222d8'; ctx.fillRect(30,110,550,570); ctx.fillRect(610,110,640,570); ctx.strokeStyle='#81adff'; ctx.strokeRect(30,110,550,570); ctx.strokeRect(610,110,640,570);
+    const s=Math.max(0,cursor-10),view=list.slice(s,s+18);
+    view.forEach((c,i)=>{const idx=s+i,y=142+i*28,sel=idx===cursor; if(sel){ctx.fillStyle='#1d2f59';ctx.fillRect(38,y-18,534,24);} ctx.fillStyle=rarityColor[c.rarity]; ctx.fillText(`${c.name} [${c.rarity}]`,50,y); if(inv.equippedId===c.id){ctx.fillStyle='#7fffc8';ctx.fillText('EQUIPPED',460,y);}});
+    const c=list[cursor]||list[0]; if(c){ctx.fillStyle=rarityColor[c.rarity];ctx.font='700 30px Segoe UI';ctx.fillText(c.name,640,166);ctx.font='600 22px Segoe UI';ctx.fillText(c.rarity,640,198);ctx.fillStyle='#ecf4ff';ctx.font='500 20px Segoe UI';ctx.fillText(`Ability: ${c.ability}`,640,238);ctx.fillText(`HP ${c.stats.hp}  ATK ${c.stats.attack}  SPD ${c.stats.speed}`,640,278);ctx.fillText(`CHI ${c.stats.chi}  CDx ${c.stats.cooldownMult.toFixed(2)}  Regen ${c.stats.chiRegen}`,640,312);} 
+  }
+  drawWorldMap(game,cursor){
+    const p=game.progress;
+    ctx.fillStyle='#cbe7ff'; ctx.font='700 36px Segoe UI'; ctx.fillText('World Chapter Map',34,58); ctx.font='500 19px Segoe UI'; ctx.fillText('J/L select chapter • Enter set active chapter • 1/2/3 switch scene',34,86);
+    ctx.fillStyle='#a9cbff'; ctx.fillText(`Unlocked: ${p.unlockedChapter}/10 | Current: Chapter ${p.currentChapter} Stage ${p.currentStage}`,34,114);
+    for(let ch=1;ch<=10;ch++){
+      const x=52+(ch-1)*120,y=180,locked=ch>p.unlockedChapter,selected=ch===cursor;
+      ctx.fillStyle=locked?'#2c3344':'#173059'; ctx.fillRect(x,y,96,66); ctx.strokeStyle=selected?'#7fffc8':'#86b2ff'; ctx.strokeRect(x,y,96,66);
+      ctx.fillStyle=locked?'#8a94aa':'#dfeeff'; ctx.font='700 20px Segoe UI'; ctx.fillText(`CH ${ch}`,x+18,y+28); ctx.font='500 12px Segoe UI'; ctx.fillText(chapterMechanics[ch-1].slice(0,14),x+6,y+50);
+    }
+    // Node path visualization for active chapter
+    const ox=120, oy=340; ctx.strokeStyle='#6da1ff'; ctx.lineWidth=2;
+    for(let n=1;n<=15;n++){const x=ox+n*70, y=oy+(n===10?-70:n===15?-130:0); if(n>1){const px=ox+(n-1)*70, py=oy+((n-1===10)?-70:(n-1===15?-130:0)); ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(x,y); ctx.stroke();}
+      const key=`${p.currentChapter}-${n}`, done=!!p.completed[key], r=p.stageRanks[key]||''; ctx.fillStyle=done?'#7dffc7':'#2e3a50'; ctx.beginPath(); ctx.arc(x,y,18,0,TAU); ctx.fill(); ctx.strokeStyle='#9ac4ff'; ctx.stroke(); ctx.fillStyle=done?'#083b28':'#dbeaff'; ctx.font='700 12px Segoe UI'; ctx.fillText(String(n),x-4,y+4); if(done){ctx.fillStyle='#ffd76f'; ctx.fillText(r,x-4,y-24);} }
+
+    ctx.fillStyle='#deecff'; ctx.font='500 18px Segoe UI';
+    ctx.fillText(`Chapter Mechanic: ${chapterMechanics[p.currentChapter-1]}`,38,620);
+    ctx.fillText(`Endgame Unlocks: ${p.endgame.hard?'Hard ':''}${p.endgame.endless?'Endless ':''}${p.endgame.pvp?'PvP ':''}${p.endgame.raid?'Raid ':''}`,38,648);
+  }
+}
+
+class GameplayScene{
+  constructor(game){ this.game=game; this.ui=new UIManager(); this.reset(); }
+  reset(){
+    this.cfg=this.game.progress.getStageConfig();
+    this.player=new Player(W/2,H/2,this.game.inventory.equipped,this.game.progress);
+    this.enemyManager=new EnemyManager(this); this.ability=new AbilityManager(this); this.collision=new CollisionManager(this);
+    this.projectiles=[]; this.clones=[]; this.slow={active:false,x:0,y:0,r:0,t:0}; this.fx={shake:0,hitFlash:0,glitch:0};
+    this.metrics={time:0,damageTaken:0,comboMax:0,combo:0,comboTimer:0,abilityCasts:0,hits:0,kills:0};
+    this.boss=null; this.stageCleared=false; this.stageRank=''; this.lastRewards={gold:0,xp:0,mats:0}; this.gameOver=false;
+    if(this.cfg.type==='Mini Boss') this.spawnBoss('Iron Revenant',1800,false);
+    if(this.cfg.type==='Final Boss') this.spawnBoss('Seraphis',2400,true);
+  }
+  enter(){ this.player.applyCharacter(this.game.inventory.equipped); }
+  spawnBoss(name,baseHp,judgment){ this.enemyManager.clear(); this.boss=new Boss(name,{baseHp,hpScale:this.cfg.scale.hp,judgment,multi:this.cfg.chapter>=8}); }
+  onEnemyKilled(){ this.metrics.kills++; this.metrics.combo++; this.metrics.comboTimer=1.8; this.metrics.comboMax=Math.max(this.metrics.comboMax,this.metrics.combo); }
+  onBossKilled(){ this.stageCleared=true; this.finishStage(); }
+  hitArc(x,y,r,damage){ for(const e of this.enemyManager.enemies) if(e.alive&&dist(x,y,e.x,e.y)<=r+e.r){e.takeDamage(damage,this);} if(this.boss?.alive&&dist(x,y,this.boss.x,this.boss.y)<=r+this.boss.r) this.boss.takeDamage(damage*.72,this); }
+  finishStage(){ if(this.stageRank) return; this.stageRank=this.game.progress.rankStage(this.metrics,this.cfg); const out=this.game.progress.clearStage(this.stageRank); this.lastRewards=out.rewards; }
+  update(dt){
+    const i=this.game.input;
+    if(this.gameOver && i.wasPressed('1')){ this.reset(); return; }
+    if(this.stageCleared && i.wasPressed('n')){ this.reset(); return; }
+
+    this.metrics.time+=dt; this.metrics.comboTimer-=dt; if(this.metrics.comboTimer<=0) this.metrics.combo=0;
+    this.player.update(dt,this);
+
+    if(!this.stageCleared&&!this.gameOver){ this.enemyManager.update(dt); this.boss?.alive&&this.boss.update(dt,this); this.collision.update(dt); this.ability.update(dt); }
+
+    if(i.wasPressed('q')) this.ability.castQ(); if(i.wasPressed('w')) this.ability.castW(); if(i.wasPressed('e')) this.ability.castE(); if(i.wasPressed('r')) this.ability.castR();
+
+    if(this.slow.active){ this.slow.t-=dt; if(this.slow.t<=0) this.slow.active=false; }
+    for(const c of this.clones) c.update(dt,this); this.clones=this.clones.filter(c=>c.alive);
+
+    const clearByKills = this.cfg.targetKills>0 && this.metrics.kills>=this.cfg.targetKills && !this.boss;
+    if(clearByKills&&!this.stageCleared){ this.stageCleared=true; this.finishStage(); }
+
+    // chapter mechanics examples
+    if(this.cfg.chapter>=2 && !this.stageCleared && Math.random()<0.004){ this.player.takeDamage(4+this.cfg.chapter,this); } // status chip
+    if(this.cfg.chapter>=6 && Math.random()<0.008){ this.fx.hitFlash=Math.max(this.fx.hitFlash,0.08);} // hazard pulse visual
+
+    this.fx.shake=Math.max(0,this.fx.shake-dt*15); this.fx.hitFlash=Math.max(0,this.fx.hitFlash-dt*1.6); this.fx.glitch=Math.max(0,this.fx.glitch-dt*1.4);
+  }
+  draw(ctx){
+    const sx=(Math.random()-.5)*this.fx.shake, sy=(Math.random()-.5)*this.fx.shake; ctx.save(); ctx.translate(sx,sy);
+    if(this.slow.active){ctx.fillStyle='#5aa2ff33';ctx.beginPath();ctx.arc(this.slow.x,this.slow.y,this.slow.r,0,TAU);ctx.fill();ctx.strokeStyle='#82b9ff';ctx.stroke();}
+    for(const p of this.projectiles)p.draw(ctx); this.enemyManager.draw(ctx); this.boss?.alive&&this.boss.draw(ctx); for(const c of this.clones)c.draw(ctx); this.player.draw(ctx);
+    ctx.restore();
+    if(this.player.glitch>70||this.player.zero){ ctx.fillStyle=`rgba(200,70,255,${0.07+this.fx.glitch*.24})`; ctx.fillRect(0,0,W,H); for(let i=0;i<9;i++){ctx.fillStyle=`rgba(${randi(120,255)},${randi(80,220)},255,0.05)`;ctx.fillRect(randi(0,W),randi(0,H),randi(30,280),2);} }
+    if(this.fx.hitFlash>0){ctx.fillStyle=`rgba(255,40,80,${this.fx.hitFlash*.35})`;ctx.fillRect(0,0,W,H);} 
+    this.ui.drawGameplay(this);
+  }
+}
+
+class GachaScene{ constructor(game){this.game=game; this.ui=new UIManager();} enter(){} update(dt){ this.game.gacha.update(dt); if(this.game.input.wasPressed('g')) this.game.gacha.pull(); } draw(){ this.ui.drawGacha(this.game);} }
+class InventoryScene{ constructor(game){this.game=game; this.ui=new UIManager(); this.cursor=0;} enter(){this.cursor=0;} update(){ const list=this.game.inventory.listOwned().sort((a,b)=>rarityOrder.indexOf(b.rarity)-rarityOrder.indexOf(a.rarity)||a.id-b.id); if(this.game.input.wasPressed('i'))this.cursor=Math.max(0,this.cursor-1); if(this.game.input.wasPressed('k'))this.cursor=Math.min(list.length-1,this.cursor+1); if(this.game.input.wasPressed('enter')){ const c=list[this.cursor]; if(c){ this.game.inventory.equip(c.id); this.game.scenes.play.player.applyCharacter(c);} } } draw(){ this.ui.drawInventory(this.game,this.cursor);} }
+class WorldMapScene{ constructor(game){this.game=game;this.ui=new UIManager();this.cursor=1;} enter(){this.cursor=this.game.progress.currentChapter;} update(){ const p=this.game.progress; if(this.game.input.wasPressed('j'))this.cursor=Math.max(1,this.cursor-1); if(this.game.input.wasPressed('l'))this.cursor=Math.min(10,this.cursor+1); if(this.game.input.wasPressed('enter')&&this.cursor<=p.unlockedChapter){ p.currentChapter=this.cursor; p.currentStage=1; this.game.scenes.play.reset(); } } draw(){ this.ui.drawWorldMap(this.game,this.cursor);} }
+
+class Game{
+  constructor(){
+    this.input=new Input();
+    this.progress=new ProgressionManager();
+    this.characters=generateCharacters();
+    this.inventory=new InventoryManager(this.characters,this.progress);
+    this.gacha=new GachaManager(this.characters,this.inventory,this.progress);
+    this.scene=new SceneManager();
+    this.scenes={play:new GameplayScene(this),gacha:new GachaScene(this),inv:new InventoryScene(this),map:new WorldMapScene(this)};
+    this.scene.set(this.scenes.play);
+    this.last=performance.now(); this.acc=0; this.step=1/120; requestAnimationFrame(this.loop.bind(this));
+  }
+  globalKeys(){ if(this.input.wasPressed('1'))this.scene.set(this.scenes.play); if(this.input.wasPressed('2'))this.scene.set(this.scenes.gacha); if(this.input.wasPressed('3'))this.scene.set(this.scenes.inv); if(this.input.wasPressed('4'))this.scene.set(this.scenes.map); }
+  loop(now){ let dt=Math.min(.05,(now-this.last)/1000); this.last=now; this.acc+=dt;
+    while(this.acc>=this.step){ this.globalKeys(); this.scene.update(this.step); this.input.end(); this.acc-=this.step; }
+    ctx.clearRect(0,0,W,H); ctx.strokeStyle='#ffffff08'; for(let x=0;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();} for(let y=0;y<H;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
+    this.scene.draw(ctx); requestAnimationFrame(this.loop.bind(this));
+  }
+}
 // -----------------------------
 // Entity Layer
 // -----------------------------
