@@ -179,6 +179,247 @@ class GachaManager{
     ctx.fillStyle='#f4f8ff'; ctx.font='700 36px Segoe UI'; ctx.fillText(a.step?c.name:'Decoding...',0,-20);
     ctx.font='500 22px Segoe UI'; ctx.fillText(a.step?c.ability:'Signal Noise',0,18);
     if(a.step){ ctx.font='500 19px Segoe UI'; ctx.fillText(`HP ${c.stats.hp}  ATK ${c.stats.attack}  SPD ${c.stats.speed}`,0,124); }
+  <title>Kael: Fractured Frame Engine</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #06080f; color: #eaf2ff; font-family: Inter, Segoe UI, Roboto, Arial, sans-serif; overflow: hidden; }
+    #game { display: block; margin: 0 auto; background: radial-gradient(circle at 50% 40%, #131b2d 0%, #070a12 65%); }
+    #help {
+      position: fixed; left: 10px; top: 10px; z-index: 20; font-size: 12px; line-height: 1.35;
+      background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.2); border-radius: 8px; padding: 8px 10px;
+      max-width: 380px;
+    }
+    .key { color: #6ce6ff; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="1280" height="720"></canvas>
+  <div id="help">
+    <div><strong>Kael Engine Controls</strong></div>
+    <div><span class="key">WASD</span> Move, <span class="key">Space</span> Slash, <span class="key">Q/W/E/R</span> Abilities</div>
+    <div><span class="key">1</span> Gameplay Scene, <span class="key">2</span> Gacha Scene, <span class="key">3</span> Inventory Scene</div>
+    <div><span class="key">G</span> Pull (Gacha), <span class="key">I/K</span> Inventory Up/Down, <span class="key">Enter</span> Equip</div>
+  </div>
+<script>
+(() => {
+'use strict';
+
+// -----------------------------
+// Core Utility Layer
+// -----------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const TAU = Math.PI * 2;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const dist2 = (ax, ay, bx, by) => {
+  const dx = bx - ax, dy = by - ay;
+  return Math.hypot(dx, dy);
+};
+const rand = (a, b) => Math.random() * (b - a) + a;
+const randi = (a, b) => Math.floor(rand(a, b + 1));
+
+class Input {
+  constructor() {
+    this.down = new Set();
+    this.pressed = new Set();
+    window.addEventListener('keydown', e => {
+      const k = e.key.toLowerCase();
+      if (!this.down.has(k)) this.pressed.add(k);
+      this.down.add(k);
+      if ([" ","arrowup","arrowdown","arrowleft","arrowright"].includes(e.key.toLowerCase())) e.preventDefault();
+    });
+    window.addEventListener('keyup', e => this.down.delete(e.key.toLowerCase()));
+  }
+  isDown(k) { return this.down.has(k.toLowerCase()); }
+  wasPressed(k) { return this.pressed.has(k.toLowerCase()); }
+  endFrame() { this.pressed.clear(); }
+}
+
+class SceneManager {
+  constructor(game) { this.game = game; this.current = null; }
+  set(scene) { this.current = scene; scene.enter?.(); }
+  update(dt) { this.current?.update(dt); }
+  draw(ctx) { this.current?.draw(ctx); }
+}
+
+// -----------------------------
+// Data Layer: Characters & Gacha
+// -----------------------------
+const rarityOrder = ['Common','Rare','Epic','Legendary','Mythic'];
+const rarityColor = {
+  Common: '#e8edf5', Rare: '#4aa3ff', Epic: '#b05dff', Legendary: '#ffcf4d', Mythic: '#ff5df7'
+};
+const rates = [
+  { rarity:'Common', weight:60 },
+  { rarity:'Rare', weight:25 },
+  { rarity:'Epic', weight:10 },
+  { rarity:'Legendary', weight:4 },
+  { rarity:'Mythic', weight:1 }
+];
+
+function generateCharacters() {
+  const themes = [
+    ['Kael','Frame Collapse'],['Nyra','Photon Arc'],['Riven','Aether Rend'],['Lune','Moonstep'],['Drax','Void Rush'],
+    ['Sera','Halo Lock'],['Ignis','Flare Lash'],['Kora','Pulse Guard'],['Vex','Null Sting'],['Astra','Starseal'],
+    ['Thorn','Briar Burst'],['Mira','Echo Waltz'],['Orin','Time Pin'],['Zeph','Gale Slice'],['Noct','Nightwire']
+  ];
+  const rarities = {
+    Common: { hp:[80,110], atk:[10,16], spd:[165,190], cd:1.15, chi: 100 },
+    Rare: { hp:[95,130], atk:[13,20], spd:[175,205], cd:1.05, chi: 110 },
+    Epic: { hp:[105,150], atk:[18,26], spd:[185,220], cd:0.98, chi: 120 },
+    Legendary: { hp:[120,180], atk:[24,34], spd:[195,235], cd:0.9, chi: 130 },
+    Mythic: { hp:[140,210], atk:[30,44], spd:[210,255], cd:0.82, chi: 145 }
+  };
+  const list = [];
+  // deterministic 60+ roster
+  for (let i=0; i<60; i++) {
+    const t = themes[i % themes.length];
+    const tierRoll = i % 100;
+    let rarity = 'Common';
+    if (tierRoll >= 99) rarity = 'Mythic';
+    else if (tierRoll >= 95) rarity = 'Legendary';
+    else if (tierRoll >= 80) rarity = 'Epic';
+    else if (tierRoll >= 55) rarity = 'Rare';
+
+    const base = rarities[rarity];
+    const n = `${t[0]}-${String(i+1).padStart(2,'0')}`;
+    const ability = `${t[1]} ${['I','II','III','IV'][i%4]}`;
+    list.push({
+      id: i+1,
+      name: n,
+      rarity,
+      ability,
+      stats: {
+        hp: randi(base.hp[0], base.hp[1]),
+        attack: randi(base.atk[0], base.atk[1]),
+        speed: randi(base.spd[0], base.spd[1]),
+        chi: base.chi,
+        cooldownMult: base.cd,
+        chiRegen: 18 + (rarityOrder.indexOf(rarity) * 2)
+      }
+    });
+  }
+  // Canon entries ensuring high-tier hero options
+  list.push({ id: 101, name:'Kael Prime', rarity:'Mythic', ability:'Absolute Frame Collapse', stats:{ hp:220, attack:48, speed:260, chi:165, cooldownMult:0.78, chiRegen:30 }});
+  list.push({ id: 102, name:'Seraphis Vessel', rarity:'Legendary', ability:'Judgment Fracture', stats:{ hp:180, attack:38, speed:230, chi:145, cooldownMult:0.86, chiRegen:24 }});
+  return list;
+}
+
+class InventoryManager {
+  constructor(characters) {
+    this.characters = characters;
+    this.owned = new Set([1,2,3,4,5]);
+    this.equippedId = 1;
+    this.pullHistory = [];
+  }
+  addCharacter(c) {
+    this.owned.add(c.id);
+    this.pullHistory.unshift(`${new Date().toLocaleTimeString()} - ${c.rarity} ${c.name}`);
+    if (this.pullHistory.length > 12) this.pullHistory.length = 12;
+  }
+  get equipped() { return this.characters.find(c => c.id === this.equippedId) || this.characters[0]; }
+  equip(id) { if (this.owned.has(id)) this.equippedId = id; }
+  ownedList() { return this.characters.filter(c => this.owned.has(c.id)); }
+}
+
+class GachaManager {
+  constructor(characters, inventory) {
+    this.characters = characters;
+    this.inventory = inventory;
+    this.pityLegendary = 0;
+    this.pityMythic = 0;
+    this.anim = { active:false, t:0, step:0, result:null };
+  }
+  rollRarity() {
+    // pity: 20 pulls no legendary => +6% legendary boost, 75 pulls => guaranteed legendary+, 140 => guaranteed mythic
+    let chanceBoostLegend = this.pityLegendary >= 20 ? Math.min(18, (this.pityLegendary - 19) * 0.6) : 0;
+    let forceLegend = this.pityLegendary >= 75;
+    let forceMythic = this.pityMythic >= 140;
+    if (forceMythic) return 'Mythic';
+    if (forceLegend) {
+      return Math.random() < 0.2 ? 'Mythic' : 'Legendary';
+    }
+    let roll = Math.random() * 100;
+    const dynamic = rates.map(r => ({...r}));
+    dynamic[3].weight += chanceBoostLegend; // legendary
+    dynamic[0].weight -= chanceBoostLegend * 0.7;
+    dynamic[1].weight -= chanceBoostLegend * 0.2;
+    dynamic[2].weight -= chanceBoostLegend * 0.1;
+
+    let acc = 0;
+    for (const r of dynamic) {
+      acc += r.weight;
+      if (roll <= acc) return r.rarity;
+    }
+    return 'Common';
+  }
+  pull() {
+    const rarity = this.rollRarity();
+    const pool = this.characters.filter(c => c.rarity === rarity);
+    const pick = pool[randi(0, pool.length - 1)];
+    this.inventory.addCharacter(pick);
+
+    this.pityLegendary++;
+    this.pityMythic++;
+    if (pick.rarity === 'Legendary' || pick.rarity === 'Mythic') this.pityLegendary = 0;
+    if (pick.rarity === 'Mythic') this.pityMythic = 0;
+
+    this.anim = { active:true, t:0, step:0, result:pick };
+    return pick;
+  }
+  update(dt) {
+    if (!this.anim.active) return;
+    this.anim.t += dt;
+    if (this.anim.step === 0 && this.anim.t > 0.65) this.anim.step = 1;
+    if (this.anim.step === 1 && this.anim.t > 1.25) this.anim.step = 2;
+    if (this.anim.t > 2.8) this.anim.active = false;
+  }
+  drawAnimation(ctx) {
+    if (!this.anim.active) return;
+    const a = this.anim;
+    const r = a.result;
+    const color = rarityColor[r.rarity];
+    ctx.save();
+    ctx.globalAlpha = clamp((a.t / 0.25), 0, 0.9);
+    const grd = ctx.createRadialGradient(W/2,H/2,40,W/2,H/2,430);
+    grd.addColorStop(0, color + 'cc');
+    grd.addColorStop(1, '#00000000');
+    ctx.fillStyle = grd;
+    ctx.fillRect(0,0,W,H);
+
+    if (r.rarity === 'Mythic') {
+      for (let i=0;i<14;i++) {
+        ctx.strokeStyle = `hsla(${(a.t*210 + i*24)%360}, 100%, 60%, 0.75)`;
+        ctx.beginPath();
+        ctx.arc(W/2,H/2, 120 + i*12 + Math.sin(a.t*5+i)*6, 0, TAU);
+        ctx.stroke();
+      }
+    }
+
+    const reveal = a.step >= 1;
+    const s = 1 + Math.sin(a.t * 12) * 0.03;
+    ctx.translate(W/2, H/2);
+    ctx.scale(s,s);
+    ctx.fillStyle = reveal ? '#0f1422ee' : '#000000cc';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 4;
+    ctx.fillRect(-180,-240,360,480);
+    ctx.strokeRect(-180,-240,360,480);
+    ctx.fillStyle = color;
+    ctx.font = '700 30px Segoe UI';
+    ctx.textAlign = 'center';
+    ctx.fillText(reveal ? r.rarity : '???', 0, -170);
+    ctx.fillStyle = '#f6f8ff';
+    ctx.font = '700 34px Segoe UI';
+    ctx.fillText(reveal ? r.name : 'Signal Locked', 0, -20);
+    ctx.font = '500 22px Segoe UI';
+    ctx.fillText(reveal ? r.ability : 'Decrypting...', 0, 20);
+    if (reveal) {
+      ctx.font = '500 20px Segoe UI';
+      ctx.fillText(`HP ${r.stats.hp}  ATK ${r.stats.attack}  SPD ${r.stats.speed}`, 0, 120);
+    }
     ctx.restore();
   }
 }
@@ -413,6 +654,766 @@ class Game{
     this.scene.draw(ctx); requestAnimationFrame(this.loop.bind(this));
   }
 }
+// -----------------------------
+// Entity Layer
+// -----------------------------
+class Entity {
+  constructor(x,y,r=12) {
+    this.x=x; this.y=y; this.vx=0; this.vy=0; this.r=r;
+    this.alive=true; this.flash=0;
+  }
+  update(dt) {}
+  draw(ctx) {}
+}
+
+class Projectile extends Entity {
+  constructor(x,y,vx,vy,damage,owner='enemy',life=2.2,color='#ff6666') {
+    super(x,y,5); this.vx=vx; this.vy=vy; this.damage=damage; this.owner=owner; this.life=life; this.color=color;
+  }
+  update(dt) {
+    this.x += this.vx*dt; this.y += this.vy*dt;
+    this.life -= dt;
+    if (this.life <= 0 || this.x<-20 || this.y<-20 || this.x>W+20 || this.y>H+20) this.alive = false;
+  }
+  draw(ctx) {
+    ctx.fillStyle = this.color;
+    ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,TAU); ctx.fill();
+  }
+}
+
+class Clone extends Entity {
+  constructor(player) {
+    super(player.x, player.y, 12);
+    this.timer = 0.36;
+    this.damage = player.attack * 0.85;
+  }
+  update(dt, world) {
+    this.timer -= dt;
+    if (this.timer <= 0) this.alive = false;
+    for (const e of world.enemyManager.enemies) {
+      if (!e.alive) continue;
+      if (dist2(this.x,this.y,e.x,e.y) < 72) {
+        e.takeDamage(this.damage);
+      }
+    }
+    if (world.boss?.alive && dist2(this.x,this.y,world.boss.x,world.boss.y)<88) world.boss.takeDamage(this.damage);
+  }
+  draw(ctx) {
+    ctx.globalAlpha = 0.46;
+    ctx.fillStyle = '#72e0ff';
+    ctx.beginPath(); ctx.arc(this.x,this.y, this.r + Math.sin(this.timer*50)*2, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+class Player extends Entity {
+  constructor(x,y,character) {
+    super(x,y,15);
+    this.applyCharacter(character);
+    this.hp = this.maxHp;
+    this.chi = this.maxChi;
+    this.glitch = 0;
+    this.zeroFrame = false;
+    this.facing = 1;
+    this.atkCd = 0;
+    this.hitInv = 0;
+    this.slashTimer = 0;
+    this.guiltyMarks = 0;
+    this.guiltyTimer = 0;
+  }
+  applyCharacter(character) {
+    this.character = character;
+    this.maxHp = character.stats.hp;
+    this.attack = character.stats.attack;
+    this.speed = character.stats.speed;
+    this.maxChi = character.stats.chi;
+    this.chiRegen = character.stats.chiRegen;
+    this.cooldownMult = character.stats.cooldownMult;
+    if (this.hp) this.hp = clamp(this.hp, 1, this.maxHp);
+    if (this.chi) this.chi = clamp(this.chi, 0, this.maxChi);
+  }
+  takeDamage(dmg, world) {
+    if (this.hitInv > 0) return;
+    this.hp -= dmg;
+    this.hitInv = 0.4;
+    world.fx.shake = Math.max(world.fx.shake, 7);
+    world.fx.damageFlash = 0.5;
+    if (this.hp <= 0) {
+      this.alive = false;
+      world.gameOver = true;
+    }
+  }
+  update(dt, world) {
+    const input = world.game.input;
+    const spd = this.speed * (this.zeroFrame ? 1.33 : 1);
+    let mx = 0, my = 0;
+    if (input.isDown('a')) mx -= 1;
+    if (input.isDown('d')) mx += 1;
+    if (input.isDown('w')) my -= 1;
+    if (input.isDown('s')) my += 1;
+    const m = Math.hypot(mx,my)||1;
+    this.vx = (mx/m)*spd;
+    this.vy = (my/m)*spd;
+    this.x = clamp(this.x + this.vx*dt, 16, W-16);
+    this.y = clamp(this.y + this.vy*dt, 16, H-16);
+    if (mx!==0) this.facing = Math.sign(mx);
+
+    this.chi = clamp(this.chi + this.chiRegen*dt, 0, this.maxChi);
+    this.atkCd -= dt;
+    this.hitInv -= dt;
+    this.slashTimer -= dt;
+
+    if (input.wasPressed(' ') && this.atkCd <= 0) {
+      this.atkCd = 0.27;
+      this.slashTimer = 0.16;
+      world.hitArc(this.x + this.facing*32, this.y, 62, this.attack * (this.zeroFrame ? 1.3 : 1), true);
+    }
+
+    if (this.zeroFrame) {
+      this.hp -= 6 * dt;
+      world.fx.glitchPulse = 0.4;
+      if (this.hp <= 1) this.zeroFrame = false;
+      if (input.wasPressed(' ') && this.atkCd <= 0.07) {
+        world.hitArc(this.x + this.facing*45, this.y, 90, this.attack * 0.75, true);
+      }
+    }
+
+    if (!this.zeroFrame && this.glitch >= 100) {
+      this.zeroFrame = true;
+      this.glitch = 100;
+      world.fx.shake = 12;
+    }
+
+    if (!this.zeroFrame && this.glitch > 0) this.glitch -= dt * 4;
+    if (this.zeroFrame) {
+      this.glitch -= dt * 13;
+      if (this.glitch <= 0) { this.glitch = 0; this.zeroFrame = false; }
+    }
+
+    if (this.guiltyTimer > 0) {
+      this.guiltyTimer -= dt;
+      if (this.guiltyTimer <= 0) this.guiltyMarks = Math.max(0, this.guiltyMarks - 1);
+    }
+  }
+  draw(ctx) {
+    ctx.save();
+    if (this.hitInv > 0) ctx.fillStyle = '#ff6b6b';
+    else ctx.fillStyle = this.zeroFrame ? '#ff4df0' : '#6ce6ff';
+    ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,TAU); ctx.fill();
+    if (this.slashTimer > 0) {
+      ctx.strokeStyle = '#d8f7ff';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, 26, -0.4 + (this.facing<0?Math.PI:0), 0.9 + (this.facing<0?Math.PI:0));
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+class Enemy extends Entity {
+  constructor(x,y,kind,scale=1) {
+    const cfg = {
+      basic: { hp:50, speed:90, dmg:9, col:'#ff8377', r:13 },
+      fast: { hp:32, speed:150, dmg:7, col:'#ffb36c', r:10 },
+      tank: { hp:120, speed:58, dmg:15, col:'#a05b5b', r:18 },
+      ranged: { hp:42, speed:72, dmg:8, col:'#c992ff', r:12 }
+    }[kind];
+    super(x,y,cfg.r);
+    this.kind = kind;
+    this.maxHp = Math.round(cfg.hp * scale);
+    this.hp = this.maxHp;
+    this.speed = cfg.speed * (1 + (scale - 1) * 0.35);
+    this.dmg = Math.round(cfg.dmg * Math.sqrt(scale));
+    this.color = cfg.col;
+    this.shootCd = rand(0.4, 1.5);
+  }
+  takeDamage(v) {
+    this.hp -= v;
+    this.flash = 0.09;
+    if (this.hp <= 0) this.alive = false;
+  }
+  update(dt, world) {
+    const p = world.player;
+    this.flash -= dt;
+    const d = dist2(this.x,this.y,p.x,p.y) || 1;
+    const dx = (p.x - this.x)/d, dy = (p.y - this.y)/d;
+    if (this.kind === 'ranged') {
+      const keep = 220;
+      const sign = d > keep ? 1 : -1;
+      this.vx = dx * this.speed * sign;
+      this.vy = dy * this.speed * sign;
+      this.shootCd -= dt;
+      if (this.shootCd <= 0) {
+        this.shootCd = rand(0.9, 1.6) / (1 + world.enemyManager.difficulty*0.08);
+        const sp = 220;
+        world.projectiles.push(new Projectile(this.x,this.y,dx*sp,dy*sp,this.dmg,'enemy',2.3,'#d5a7ff'));
+      }
+    } else {
+      this.vx = dx * this.speed;
+      this.vy = dy * this.speed;
+    }
+    if (world.slowField.active && dist2(this.x,this.y,world.slowField.x,world.slowField.y) < world.slowField.r) {
+      this.vx *= 0.35; this.vy *= 0.35;
+    }
+    this.x += this.vx*dt; this.y += this.vy*dt;
+
+    if (d < this.r + p.r + 3) p.takeDamage(this.dmg * dt * 2.5, world);
+  }
+  draw(ctx) {
+    ctx.fillStyle = this.flash>0 ? '#fff' : this.color;
+    ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,TAU); ctx.fill();
+    // hp pip
+    ctx.fillStyle = '#000a';
+    ctx.fillRect(this.x - 16, this.y - this.r - 12, 32, 4);
+    ctx.fillStyle = '#89ff97';
+    ctx.fillRect(this.x - 16, this.y - this.r - 12, 32 * (this.hp/this.maxHp), 4);
+  }
+}
+
+class BossSeraphis extends Entity {
+  constructor(scale=1) {
+    super(W/2, 130, 34);
+    this.maxHp = Math.round(2200 * scale);
+    this.hp = this.maxHp;
+    this.phase = 1;
+    this.attackT = 0;
+    this.moveT = 0;
+    this.judgeT = 6;
+    this.alive = true;
+  }
+  takeDamage(v) {
+    this.hp -= v;
+    this.flash = 0.1;
+    if (this.hp <= 0) this.alive = false;
+  }
+  update(dt, world) {
+    this.flash -= dt;
+    const hpPct = this.hp / this.maxHp;
+    this.phase = hpPct > 0.66 ? 1 : hpPct > 0.33 ? 2 : 3;
+
+    const p = world.player;
+    this.moveT -= dt;
+    if (this.moveT <= 0) {
+      this.moveT = 1.1 - this.phase * 0.14;
+      const tx = clamp(p.x + rand(-220, 220), 120, W-120);
+      const ty = clamp(100 + rand(-35, 95), 70, 250);
+      this.vx = (tx - this.x) * 1.8;
+      this.vy = (ty - this.y) * 1.8;
+    }
+    this.x += this.vx*dt; this.y += this.vy*dt;
+
+    this.attackT -= dt;
+    if (this.attackT <= 0) {
+      this.attackT = Math.max(0.4, 1.3 - this.phase*0.2);
+      this.shootPattern(world);
+    }
+
+    if (this.phase >= 2 && Math.random() < 0.015 + this.phase*0.004) {
+      // sweeping burst
+      for (let i=0;i<8 + this.phase*2;i++) {
+        const a = (i/(8+this.phase*2))*TAU + Math.random()*0.15;
+        world.projectiles.push(new Projectile(this.x,this.y,Math.cos(a)*170,Math.sin(a)*170,10 + this.phase*2,'enemy',2.8,'#ff97e8'));
+      }
+    }
+
+    if (this.phase === 3) {
+      this.judgeT -= dt;
+      if (this.judgeT <= 0) {
+        this.judgeT = 4.2;
+        p.guiltyMarks += 1;
+        p.guiltyTimer = 9;
+        world.fx.damageFlash = 0.25;
+        if (p.guiltyMarks >= 3) {
+          p.guiltyMarks = 0;
+          p.takeDamage(48, world);
+          world.fx.shake = 16;
+        }
+      }
+    }
+
+    if (dist2(this.x,this.y,p.x,p.y) < this.r + p.r + 8) {
+      p.takeDamage(18*dt, world);
+    }
+  }
+  shootPattern(world) {
+    const p = world.player;
+    const aim = Math.atan2(p.y - this.y, p.x - this.x);
+    const shots = this.phase === 1 ? 3 : this.phase === 2 ? 5 : 7;
+    const spread = this.phase === 1 ? 0.25 : 0.55;
+    for (let i=0;i<shots;i++) {
+      const t = shots===1 ? 0 : (i/(shots-1)-0.5);
+      const a = aim + t*spread;
+      const speed = 230 + this.phase*26;
+      world.projectiles.push(new Projectile(this.x,this.y,Math.cos(a)*speed,Math.sin(a)*speed,12+this.phase*2,'enemy',3,'#ffd4f2'));
+    }
+  }
+  draw(ctx) {
+    ctx.fillStyle = this.flash>0 ? '#fff' : ['#ff99d2','#ff67bb','#ff3ca3'][this.phase-1];
+    ctx.beginPath(); ctx.arc(this.x,this.y,this.r,0,TAU); ctx.fill();
+    ctx.strokeStyle = '#ffd1ea'; ctx.lineWidth = 2;
+    ctx.strokeRect(this.x-12,this.y-12,24,24);
+  }
+}
+
+// -----------------------------
+// Managers
+// -----------------------------
+class AbilityManager {
+  constructor(world) {
+    this.world = world;
+    this.cooldowns = { q:0,w:0,e:0,r:0 };
+    this.base = { q:4,w:7,e:8,r:12 };
+  }
+  update(dt) {
+    for (const k in this.cooldowns) this.cooldowns[k] = Math.max(0, this.cooldowns[k]-dt);
+  }
+  canCast(key, chi) {
+    return this.cooldowns[key] <= 0 && this.world.player.chi >= chi;
+  }
+  addGlitch(v) {
+    const p = this.world.player;
+    p.glitch = clamp(p.glitch + v, 0, 100);
+  }
+  castQ() { // Dash
+    const p = this.world.player;
+    const chi = 18;
+    if (!this.canCast('q', chi)) return;
+    p.chi -= chi;
+    const input = this.world.game.input;
+    let dx = (input.isDown('d')?1:0)-(input.isDown('a')?1:0);
+    let dy = (input.isDown('s')?1:0)-(input.isDown('w')?1:0);
+    if (!dx && !dy) dx = p.facing;
+    const m = Math.hypot(dx,dy)||1;
+    p.x = clamp(p.x + (dx/m)*170, 16, W-16);
+    p.y = clamp(p.y + (dy/m)*170, 16, H-16);
+    this.world.hitArc(p.x,p.y,58,p.attack*1.45,true);
+    this.cooldowns.q = this.base.q * p.cooldownMult;
+    this.addGlitch(18);
+    this.world.fx.shake = 9;
+  }
+  castW() { // Slow field
+    const p = this.world.player;
+    const chi = 24;
+    if (!this.canCast('w', chi)) return;
+    p.chi -= chi;
+    this.world.slowField = { active:true, x:p.x, y:p.y, r:180, t:3.2 };
+    this.cooldowns.w = this.base.w * p.cooldownMult;
+    this.addGlitch(22);
+  }
+  castE() { // Clone attack
+    const p = this.world.player;
+    const chi = 21;
+    if (!this.canCast('e', chi)) return;
+    p.chi -= chi;
+    const c = new Clone(p);
+    this.world.clones.push(c);
+    this.cooldowns.e = this.base.e * p.cooldownMult;
+    this.addGlitch(20);
+    this.world.fx.glitchPulse = 0.35;
+  }
+  castR() { // Frame collapse: delete projectiles + blast
+    const p = this.world.player;
+    const chi = 38;
+    if (!this.canCast('r', chi)) return;
+    p.chi -= chi;
+    let deleted = 0;
+    for (const pr of this.world.projectiles) {
+      if (pr.owner === 'enemy' && dist2(pr.x,pr.y,p.x,p.y) < 280) {
+        pr.alive = false;
+        deleted++;
+      }
+    }
+    this.world.hitArc(p.x,p.y,130,p.attack*1.8 + deleted*0.5,true);
+    this.cooldowns.r = this.base.r * p.cooldownMult;
+    this.addGlitch(32);
+    this.world.fx.shake = 15;
+    this.world.fx.damageFlash = 0.2;
+  }
+}
+
+class EnemyManager {
+  constructor(world) {
+    this.world = world;
+    this.enemies = [];
+    this.spawnT = 0;
+    this.waveTime = 0;
+    this.difficulty = 1;
+  }
+  update(dt) {
+    this.waveTime += dt;
+    this.difficulty = 1 + this.waveTime / 45;
+    this.spawnT -= dt;
+    const maxEnemies = 20 + Math.floor(this.difficulty * 2);
+    if (this.spawnT <= 0 && this.enemies.length < maxEnemies) {
+      this.spawnT = Math.max(0.22, 1.1 - this.difficulty * 0.06);
+      this.spawn();
+    }
+
+    for (const e of this.enemies) e.update(dt, this.world);
+    this.enemies = this.enemies.filter(e => e.alive);
+  }
+  spawn() {
+    const edge = randi(0,3);
+    let x,y;
+    if (edge===0) { x = rand(0,W); y = -20; }
+    if (edge===1) { x = W+20; y = rand(0,H); }
+    if (edge===2) { x = rand(0,W); y = H+20; }
+    if (edge===3) { x = -20; y = rand(0,H); }
+
+    const r = Math.random();
+    let kind = 'basic';
+    if (r < 0.48) kind='basic';
+    else if (r < 0.7) kind='fast';
+    else if (r < 0.88) kind='tank';
+    else kind='ranged';
+    this.enemies.push(new Enemy(x,y,kind,this.difficulty));
+  }
+  draw(ctx) { for (const e of this.enemies) e.draw(ctx); }
+}
+
+class CollisionManager {
+  constructor(world) { this.world = world; }
+  update(dt) {
+    const p = this.world.player;
+    for (const pr of this.world.projectiles) {
+      if (!pr.alive) continue;
+      pr.update(dt);
+      if (pr.owner === 'enemy' && dist2(pr.x,pr.y,p.x,p.y) < p.r + pr.r) {
+        p.takeDamage(pr.damage, this.world);
+        pr.alive = false;
+      }
+    }
+    this.world.projectiles = this.world.projectiles.filter(p => p.alive);
+  }
+}
+
+class UIManager {
+  constructor(world) { this.world = world; }
+  bar(x,y,w,h,val,max,color,label) {
+    ctx.fillStyle = '#0009'; ctx.fillRect(x,y,w,h);
+    ctx.fillStyle = color; ctx.fillRect(x,y,w*clamp(val/max,0,1),h);
+    ctx.strokeStyle = '#ffffff44'; ctx.strokeRect(x,y,w,h);
+    ctx.fillStyle = '#f5f8ff'; ctx.font = '600 13px Segoe UI';
+    ctx.fillText(`${label}: ${Math.round(val)}/${Math.round(max)}`, x+8, y+h-6);
+  }
+  drawGameplay() {
+    const p = this.world.player;
+    this.bar(20,20,280,18,p.hp,p.maxHp,'#ff6174','HP');
+    this.bar(20,45,280,16,p.chi,p.maxChi,'#54b2ff','Chi');
+    this.bar(20,67,280,14,p.glitch,100,p.zeroFrame?'#ff3cd6':'#8a76ff','Glitch');
+
+    // cooldown pips
+    const am = this.world.abilityManager;
+    const entries = [['Q','q'],['W','w'],['E','e'],['R','r']];
+    entries.forEach((e,i) => {
+      const x = 20 + i*72, y = H-72, w = 64, h = 52;
+      ctx.fillStyle = '#0a1020cc'; ctx.fillRect(x,y,w,h);
+      const c = am.cooldowns[e[1]];
+      const max = am.base[e[1]] * p.cooldownMult;
+      const ready = c <= 0;
+      ctx.fillStyle = ready ? '#7dffc6' : '#ffb2b2';
+      ctx.fillText(e[0], x+8, y+16);
+      ctx.fillStyle = '#eaf2ff';
+      ctx.fillText(ready ? 'READY' : c.toFixed(1)+'s', x+8, y+38);
+      ctx.strokeStyle = ready ? '#7dffc6' : '#ffffff33';
+      ctx.strokeRect(x,y,w,h);
+      if (!ready) {
+        ctx.fillStyle = '#0008';
+        ctx.fillRect(x,y,w,h*(c/max));
+      }
+    });
+
+    if (this.world.boss && this.world.boss.alive) {
+      const b = this.world.boss;
+      this.bar(W*0.2, 18, W*0.6, 20, b.hp, b.maxHp, '#ff65b6', `SERAPHIS P${b.phase}`);
+      ctx.fillStyle = '#ffd6ef';
+      ctx.fillText(`Judgment Marks: ${p.guiltyMarks}/3`, W*0.2, 54);
+    }
+
+    ctx.fillStyle = '#9ec6ff';
+    ctx.fillText(`Equipped: ${p.character.name} (${p.character.rarity})`, 330, 36);
+    ctx.fillText(`Ability Sigil: ${p.character.ability}`, 330, 56);
+
+    if (this.world.gameOver) {
+      ctx.fillStyle = '#000b'; ctx.fillRect(0,0,W,H);
+      ctx.fillStyle = '#ff9ea9'; ctx.font = '700 54px Segoe UI';
+      ctx.fillText('SYSTEM FAILURE', W/2-190, H/2-20);
+      ctx.font = '500 26px Segoe UI'; ctx.fillStyle = '#eaf2ff';
+      ctx.fillText('Press 1 to restart gameplay', W/2-145, H/2+30);
+    }
+  }
+  drawGacha(gacha, inventory) {
+    ctx.fillStyle = '#b7d6ff';
+    ctx.font = '700 36px Segoe UI';
+    ctx.fillText('Chrono Gacha Terminal', 40, 64);
+    ctx.font = '500 20px Segoe UI';
+    ctx.fillText('Press G to Pull • Press 1 for combat • Press 3 for inventory', 40, 94);
+
+    ctx.fillStyle = '#dfeaff';
+    ctx.font = '500 18px Segoe UI';
+    let y = 140;
+    ctx.fillText('Drop Rates:', 40, y); y += 28;
+    for (const r of rates) {
+      ctx.fillStyle = rarityColor[r.rarity];
+      ctx.fillText(`${r.rarity}: ${r.weight}%`, 58, y);
+      y += 24;
+    }
+    ctx.fillStyle = '#e8f0ff';
+    ctx.fillText(`Pity (Legendary+ guarantee at 75): ${gacha.pityLegendary}`, 40, y+20);
+    ctx.fillText(`Pity (Mythic guarantee at 140): ${gacha.pityMythic}`, 40, y+45);
+
+    ctx.fillStyle = '#0a1020cc'; ctx.fillRect(W-450, 130, 390, 290);
+    ctx.strokeStyle = '#8ab8ff'; ctx.strokeRect(W-450,130,390,290);
+    ctx.fillStyle = '#ecf3ff';
+    ctx.font = '700 22px Segoe UI'; ctx.fillText('Recent Pulls', W-420, 162);
+    ctx.font = '500 15px Segoe UI';
+    let py = 188;
+    for (const h of inventory.pullHistory) {
+      ctx.fillStyle = '#d3e5ff';
+      ctx.fillText(h, W-420, py);
+      py += 20;
+    }
+
+    if (gacha.anim.active) gacha.drawAnimation(ctx);
+  }
+  drawInventory(inventory, cursor) {
+    const list = inventory.ownedList().sort((a,b) => rarityOrder.indexOf(b.rarity)-rarityOrder.indexOf(a.rarity) || a.id-b.id);
+    ctx.fillStyle = '#cff1ff'; ctx.font = '700 34px Segoe UI';
+    ctx.fillText('Inventory Matrix', 40, 58);
+    ctx.font = '500 18px Segoe UI';
+    ctx.fillText('I/K move cursor, Enter equip • Press 1 for combat • Press 2 for gacha', 40, 84);
+
+    ctx.fillStyle = '#0a1020cc';
+    ctx.fillRect(40,110,540,560);
+    ctx.fillRect(610,110,630,560);
+    ctx.strokeStyle = '#7fa8ff';
+    ctx.strokeRect(40,110,540,560);
+    ctx.strokeRect(610,110,630,560);
+
+    const start = Math.max(0, cursor - 10);
+    const view = list.slice(start, start + 18);
+    view.forEach((c, i) => {
+      const idx = start+i;
+      const y = 142 + i*28;
+      const selected = idx === cursor;
+      if (selected) { ctx.fillStyle = '#1d2e55'; ctx.fillRect(48,y-18,520,24); }
+      ctx.fillStyle = rarityColor[c.rarity];
+      ctx.fillText(`${c.name} [${c.rarity}]`, 58, y);
+      if (inventory.equippedId === c.id) {
+        ctx.fillStyle = '#7dffc6'; ctx.fillText('EQUIPPED', 445, y);
+      }
+    });
+
+    const chosen = list[cursor] || list[0];
+    if (chosen) {
+      ctx.fillStyle = rarityColor[chosen.rarity]; ctx.font = '700 30px Segoe UI';
+      ctx.fillText(chosen.name, 640, 170);
+      ctx.font = '600 22px Segoe UI'; ctx.fillText(chosen.rarity, 640, 204);
+      ctx.fillStyle = '#ecf4ff'; ctx.font = '500 20px Segoe UI';
+      ctx.fillText(`Ability: ${chosen.ability}`, 640, 244);
+      ctx.fillText(`HP: ${chosen.stats.hp}`, 640, 284);
+      ctx.fillText(`ATK: ${chosen.stats.attack}`, 640, 314);
+      ctx.fillText(`SPD: ${chosen.stats.speed}`, 640, 344);
+      ctx.fillText(`CHI: ${chosen.stats.chi}`, 640, 374);
+      ctx.fillText(`CD Mult: ${chosen.stats.cooldownMult.toFixed(2)}`, 640, 404);
+      ctx.fillText(`Chi Regen: ${chosen.stats.chiRegen}/s`, 640, 434);
+      ctx.fillStyle = '#b7ccff';
+      ctx.fillText('Equip selected character to apply stats and ability profile in combat.', 640, 488);
+    }
+  }
+}
+
+// -----------------------------
+// Gameplay Scene
+// -----------------------------
+class GameplayScene {
+  constructor(game) {
+    this.game = game;
+    this.reset();
+  }
+  reset() {
+    const ch = this.game.inventory.equipped;
+    this.player = new Player(W/2, H/2, ch);
+    this.enemyManager = new EnemyManager(this);
+    this.abilityManager = new AbilityManager(this);
+    this.collisionManager = new CollisionManager(this);
+    this.ui = new UIManager(this);
+    this.projectiles = [];
+    this.clones = [];
+    this.slowField = { active:false, x:0,y:0,r:0,t:0 };
+    this.fx = { shake:0, damageFlash:0, glitchPulse:0 };
+    this.timer = 0;
+    this.boss = null;
+    this.gameOver = false;
+  }
+  enter() {
+    // reapply chosen character on scene entry
+    if (!this.player) this.reset();
+    else this.player.applyCharacter(this.game.inventory.equipped);
+  }
+  hitArc(x,y,radius,dmg,playerOwned) {
+    for (const e of this.enemyManager.enemies) {
+      if (!e.alive) continue;
+      if (dist2(x,y,e.x,e.y) <= radius + e.r) {
+        e.takeDamage(dmg);
+      }
+    }
+    if (this.boss?.alive && dist2(x,y,this.boss.x,this.boss.y)<=radius + this.boss.r) {
+      this.boss.takeDamage(dmg*0.72);
+    }
+  }
+  update(dt) {
+    const input = this.game.input;
+    if (this.gameOver && input.wasPressed('1')) { this.reset(); return; }
+
+    this.timer += dt;
+    this.player.update(dt, this);
+
+    if (!this.boss && this.timer > 70) {
+      this.boss = new BossSeraphis(1 + this.enemyManager.difficulty*0.1);
+      this.enemyManager.enemies.length = 0;
+    }
+
+    if (!this.gameOver) this.enemyManager.update(dt);
+    if (this.boss?.alive && !this.gameOver) this.boss.update(dt, this);
+
+    if (this.slowField.active) {
+      this.slowField.t -= dt;
+      if (this.slowField.t <= 0) this.slowField.active = false;
+    }
+
+    for (const c of this.clones) c.update(dt, this);
+    this.clones = this.clones.filter(c => c.alive);
+
+    this.collisionManager.update(dt);
+    this.abilityManager.update(dt);
+
+    if (input.wasPressed('q')) this.abilityManager.castQ();
+    if (input.wasPressed('w')) this.abilityManager.castW();
+    if (input.wasPressed('e')) this.abilityManager.castE();
+    if (input.wasPressed('r')) this.abilityManager.castR();
+
+    this.fx.shake = Math.max(0, this.fx.shake - dt*16);
+    this.fx.damageFlash = Math.max(0, this.fx.damageFlash - dt*1.6);
+    this.fx.glitchPulse = Math.max(0, this.fx.glitchPulse - dt*1.5);
+  }
+  draw(ctx) {
+    // camera shake
+    const sx = (Math.random()-0.5) * this.fx.shake;
+    const sy = (Math.random()-0.5) * this.fx.shake;
+    ctx.save(); ctx.translate(sx,sy);
+
+    if (this.slowField.active) {
+      const sf = this.slowField;
+      ctx.fillStyle = '#5fa3ff33';
+      ctx.beginPath(); ctx.arc(sf.x,sf.y,sf.r,0,TAU); ctx.fill();
+      ctx.strokeStyle = '#80b8ff'; ctx.stroke();
+    }
+
+    for (const pr of this.projectiles) pr.draw(ctx);
+    this.enemyManager.draw(ctx);
+    this.boss?.alive && this.boss.draw(ctx);
+    for (const c of this.clones) c.draw(ctx);
+    this.player.draw(ctx);
+
+    ctx.restore();
+
+    // overlays
+    if (this.player.glitch > 70 || this.player.zeroFrame) {
+      ctx.fillStyle = `rgba(200,70,255,${0.06 + this.fx.glitchPulse*0.25})`;
+      ctx.fillRect(0,0,W,H);
+      for (let i=0;i<10;i++) {
+        ctx.fillStyle = `rgba(${randi(120,255)},${randi(80,220)},255,0.05)`;
+        ctx.fillRect(randi(0,W), randi(0,H), randi(40,280), 2);
+      }
+    }
+    if (this.fx.damageFlash > 0) {
+      ctx.fillStyle = `rgba(255,40,80,${this.fx.damageFlash*0.35})`;
+      ctx.fillRect(0,0,W,H);
+    }
+
+    this.ui.drawGameplay();
+  }
+}
+
+class GachaScene {
+  constructor(game) { this.game = game; this.ui = new UIManager(null); }
+  enter() {}
+  update(dt) {
+    this.game.gacha.update(dt);
+    if (this.game.input.wasPressed('g') && !this.game.gacha.anim.active) this.game.gacha.pull();
+  }
+  draw(ctx) { this.ui.drawGacha(this.game.gacha, this.game.inventory); }
+}
+
+class InventoryScene {
+  constructor(game) { this.game = game; this.ui = new UIManager(null); this.cursor = 0; }
+  enter() { this.cursor = 0; }
+  update(dt) {
+    const list = this.game.inventory.ownedList().sort((a,b) => rarityOrder.indexOf(b.rarity)-rarityOrder.indexOf(a.rarity) || a.id-b.id);
+    if (this.game.input.wasPressed('i')) this.cursor = Math.max(0, this.cursor-1);
+    if (this.game.input.wasPressed('k')) this.cursor = Math.min(list.length-1, this.cursor+1);
+    if (this.game.input.wasPressed('enter')) {
+      const c = list[this.cursor];
+      if (c) this.game.inventory.equip(c.id);
+      // propagate to gameplay scene immediately
+      this.game.scenes.gameplay.player.applyCharacter(this.game.inventory.equipped);
+    }
+  }
+  draw(ctx) { this.ui.drawInventory(this.game.inventory, this.cursor); }
+}
+
+class Game {
+  constructor() {
+    this.input = new Input();
+    this.characters = generateCharacters();
+    this.inventory = new InventoryManager(this.characters);
+    this.gacha = new GachaManager(this.characters, this.inventory);
+
+    this.sceneManager = new SceneManager(this);
+    this.scenes = {
+      gameplay: new GameplayScene(this),
+      gacha: new GachaScene(this),
+      inventory: new InventoryScene(this)
+    };
+    this.sceneManager.set(this.scenes.gameplay);
+
+    this.last = performance.now();
+    this.accum = 0;
+    this.fixed = 1/120;
+    requestAnimationFrame(this.loop.bind(this));
+  }
+  handleGlobalKeys() {
+    if (this.input.wasPressed('1')) this.sceneManager.set(this.scenes.gameplay);
+    if (this.input.wasPressed('2')) this.sceneManager.set(this.scenes.gacha);
+    if (this.input.wasPressed('3')) this.sceneManager.set(this.scenes.inventory);
+  }
+  loop(now) {
+    let dt = (now - this.last) / 1000;
+    this.last = now;
+    dt = Math.min(dt, 0.05);
+    this.accum += dt;
+
+    while (this.accum >= this.fixed) {
+      this.handleGlobalKeys();
+      this.sceneManager.update(this.fixed);
+      this.input.endFrame();
+      this.accum -= this.fixed;
+    }
+
+    ctx.clearRect(0,0,W,H);
+    // background grid for engine feel
+    ctx.strokeStyle = '#ffffff08';
+    for (let x=0;x<W;x+=40) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+    for (let y=0;y<H;y+=40) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+
+    this.sceneManager.draw(ctx);
+
+    requestAnimationFrame(this.loop.bind(this));
+  }
+}
+
 new Game();
 })();
 </script>
